@@ -4,10 +4,21 @@ import { MediaConvertClient, CreateJobCommand, type CreateJobCommandInput, GetJo
 import { env } from '../env.js';
 import { db } from '../db/index.js';
 
-const s3Client = new S3Client({ region: env.AWS_REGION });
+const s3Client = new S3Client({ 
+  region: env.AWS_REGION,
+  credentials: {
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY
+  }
+});
+
 const mediaConvertClient = new MediaConvertClient({ 
   region: env.AWS_REGION,
-  endpoint: env.MEDIACONVERT_ENDPOINT 
+  endpoint: env.MEDIACONVERT_ENDPOINT,
+  credentials: {
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY
+  }
 });
 
 export async function processVideoUpload(fastify: FastifyInstance) {

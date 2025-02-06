@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import { processVideoUpload } from './routes/video.js';
+import { userRoutes } from './routes/user.js';
 
 const fastify = Fastify({
   logger: true
@@ -15,6 +16,7 @@ fastify.register(multipart, {
 
 // Register routes
 fastify.register(processVideoUpload);
+fastify.register(userRoutes);
 
 // Start server
 const start = async () => {
