@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+      "target": "esnext",
+      "allowJs": true,
+      "skipLibCheck": true,
+      "incremental": true,
+      "module": "nodenext",
+      "esModuleInterop": true,
+      "moduleResolution": "nodenext",
+      "resolveJsonModule": true,
+      "strict": true,
+      "outDir": "./dist"
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}
