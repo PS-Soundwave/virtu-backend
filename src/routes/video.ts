@@ -3,6 +3,7 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client
 import { MediaConvertClient, CreateJobCommand, type CreateJobCommandInput, GetJobCommand } from '@aws-sdk/client-mediaconvert';
 import { env } from '../env.js';
 import { db } from '../db/index.js';
+import { AuthenticatedRequest, authenticateRequest } from '../middleware/auth.js';
 
 const s3Client = new S3Client({ 
   region: env.AWS_REGION,
@@ -22,7 +23,7 @@ const mediaConvertClient = new MediaConvertClient({
 });
 
 export async function processVideoUpload(fastify: FastifyInstance) {
-  fastify.post('/upload', async (request, reply) => {
+  /*fastify.post('/upload', async (request, reply) => {
     try {
       const data = await request.file();
       
@@ -175,7 +176,7 @@ export async function processVideoUpload(fastify: FastifyInstance) {
       request.log.error(error);
       throw error;
     }
-  });
+  });*/
 
   fastify.get('/videos', async (request, reply) => {
     try {
@@ -191,4 +192,83 @@ export async function processVideoUpload(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Failed to fetch videos' });
     }
   });
-} 
+
+  // Get videos uploaded by a specific user
+  fastify.get('/user/:userId/videos', async (request, reply) => {
+    const { userId } = request.params as { userId: string };
+
+    const videos = await db
+      .selectFrom('videos')
+      .where('uploader', '=', userId)
+      .select(['id', 'key', 'created_at'])
+      .orderBy('created_at', 'desc')
+      .execute();
+
+    return reply.send({ videos });
+  });
+
+  // Simple upload endpoint that just uploads to S3
+  fastify.post('/upload', { preHandler: authenticateRequest }, async (request, reply) => {
+      const [user] = await db
+      .selectFrom('users')
+      .select(['id'])
+      .where('firebase_id', '=', (request as AuthenticatedRequest).user.firebaseUid)
+      .execute();
+
+      if (!user) {
+        return reply.code(401);
+      }
+    
+      const data = await request.file();
+      
+      if (!data) {
+        return reply.code(400);
+      }
+
+      const extension = data.filename.split('.').pop();
+      const key = `${crypto.randomUUID()}.${extension}`;
+      
+      // Parse content length if available
+      const totalSize = request.headers['content-length'] 
+        ? Number(request.headers['content-length']) 
+        : undefined;
+      
+      // Initialize upload tracking
+      const chunks: Buffer[] = [];
+      let receivedSize = 0;
+      
+      const progress = (received: number) => {
+        const percent = totalSize 
+          ? Math.floor((received / totalSize) * 100) 
+          : undefined;
+        
+        request.log.info(
+          `Received ${received} bytes${percent ? ` (${percent}%)` : ''}`
+        );
+      };
+      
+      for await (const chunk of data.file) {
+        chunks.push(chunk);
+        receivedSize += chunk.length;
+        progress(receivedSize);
+      }
+      const fileBuffer = Buffer.concat(chunks);
+
+      // Upload directly to S3
+      await s3Client.send(new PutObjectCommand({
+        Bucket: env.S3_BUCKET,
+        Key: key,
+        Body: fileBuffer,
+        ContentType: data.mimetype
+      }));
+
+      // Save video record to database
+      await db
+        .insertInto('videos')
+        .values({
+          key,
+          uploader: user.id
+        })
+        .execute();
+  });
+}
