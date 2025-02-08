@@ -1,9 +1,9 @@
 import { FastifyInstance } from 'fastify';
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { MediaConvertClient, CreateJobCommand, type CreateJobCommandInput, GetJobCommand } from '@aws-sdk/client-mediaconvert';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { MediaConvertClient } from '@aws-sdk/client-mediaconvert';
 import { env } from '../env.js';
 import { db } from '../db/index.js';
-import { AuthenticatedRequest, authenticateRequest } from '../middleware/auth.js';
+import { authenticateRequest } from '../middleware/auth.js';
 
 const s3Client = new S3Client({ 
   region: env.AWS_REGION,
@@ -178,7 +178,7 @@ export async function processVideoUpload(fastify: FastifyInstance) {
     }
   });*/
 
-  fastify.get('/videos', async (request, reply) => {
+  fastify.get<{Reply: Video[]}>('/video', async (request, reply) => {
     try {
       const videos = await db
         .selectFrom('videos')
@@ -186,33 +186,19 @@ export async function processVideoUpload(fastify: FastifyInstance) {
         .orderBy('created_at', 'desc')
         .execute();
 
-      return reply.send({ videos });
+      return reply.send(videos);
     } catch (error) {
       console.error('Error fetching videos:', error);
-      return reply.status(500).send({ error: 'Failed to fetch videos' });
+      return reply.status(500);
     }
   });
 
-  // Get videos uploaded by a specific user
-  fastify.get('/user/:userId/videos', async (request, reply) => {
-    const { userId } = request.params as { userId: string };
-
-    const videos = await db
-      .selectFrom('videos')
-      .where('uploader', '=', userId)
-      .select(['id', 'key', 'created_at'])
-      .orderBy('created_at', 'desc')
-      .execute();
-
-    return reply.send({ videos });
-  });
-
   // Simple upload endpoint that just uploads to S3
-  fastify.post('/upload', { preHandler: authenticateRequest }, async (request, reply) => {
+  fastify.post('/video', { preHandler: authenticateRequest }, async (request, reply) => {
       const [user] = await db
       .selectFrom('users')
       .select(['id'])
-      .where('firebase_id', '=', (request as AuthenticatedRequest).user.firebaseUid)
+      .where('firebase_id', '=', request.uid!)
       .execute();
 
       if (!user) {
@@ -271,4 +257,9 @@ export async function processVideoUpload(fastify: FastifyInstance) {
         })
         .execute();
   });
+}
+
+export type Video = {
+  id: string,
+  key: string
 }
