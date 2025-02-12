@@ -163,7 +163,7 @@ export async function userRoutes(fastify: FastifyInstance) {
     const videos = await db
       .selectFrom('videos')
       .where('uploader', '=', request.params.userId)
-      .select(['id', 'key'])
+      .select(['id', 'key', 'thumbnail_key'])
       .orderBy('created_at', 'desc')
       .execute();
 

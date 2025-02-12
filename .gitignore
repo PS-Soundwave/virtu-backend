@@ -2,3 +2,5 @@ node_modules/
 dist/
 
 .env
+
+models/ggml-base.en.bin
