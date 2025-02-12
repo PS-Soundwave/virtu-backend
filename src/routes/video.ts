@@ -286,7 +286,7 @@ export async function processVideoUpload(fastify: FastifyInstance) {
         .executeTakeFirst();
 
       if (!user) {
-        return reply.code(401);
+        return reply.status(401).send();
       }
 
       const data = await request.file();
@@ -327,10 +327,10 @@ export async function processVideoUpload(fastify: FastifyInstance) {
         request.log.error({ error }, 'Async processing failed');
       }));
 
-      return reply.send();
+      return reply.status(201).send();
     } catch (error) {
       request.log.error(error);
-      return reply.status(500);
+      return reply.status(500).send();
     }
   });
 
@@ -342,10 +342,10 @@ export async function processVideoUpload(fastify: FastifyInstance) {
         .orderBy('created_at', 'desc')
         .execute();
 
-      return reply.send(videos);
+      return reply.status(200).send(videos);
     } catch (error) {
       console.error('Error fetching videos:', error);
-      return reply.status(500);
+      return reply.status(500).send();
     }
   });
 }

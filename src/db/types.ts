@@ -4,6 +4,7 @@ export interface Database {
     videos: VideoTable;
     users: UserTable;
     subtitles: SubtitleTable;
+    follows: FollowTable;
 }
 
 export interface VideoTable {
@@ -21,12 +22,17 @@ export interface UserTable {
     created_at: Generated<Date>;
 }
 
-
 export interface SubtitleTable {
     id: Generated<string>;
     video_id: string;
     start_time: number;
     end_time: number;
     text: string;
+    created_at: Generated<Date>;
+}
+
+export interface FollowTable {
+    follower_id: string;
+    followed_id: string;
     created_at: Generated<Date>;
 }

@@ -34,7 +34,7 @@ export async function userRoutes(fastify: FastifyInstance) {
       
       // Basic input validation
       if (!query || query.length < 1) {
-        return reply.code(400);
+        return reply.status(400).send();
       }
 
       // Escape special characters for LIKE query
@@ -49,10 +49,10 @@ export async function userRoutes(fastify: FastifyInstance) {
         .limit(10)
         .execute();
 
-      return reply.send(suggestions);
+      return reply.status(200).send(suggestions);
     } catch (error) {
       request.log.error(error);
-      return reply.code(500);
+      return reply.status(500).send();
     }
   });
 
@@ -79,13 +79,13 @@ export async function userRoutes(fastify: FastifyInstance) {
         .executeTakeFirst();
 
       if (!existingUser) {
-        return reply.code(404);
+        return reply.status(404).send();
       }
 
-      return reply.send(existingUser);
+      return reply.status(200).send(existingUser);
     } catch (error) {
       request.log.error(error);
-      return reply.code(500);
+      return reply.status(500).send();
     }
   });
 
@@ -101,13 +101,13 @@ export async function userRoutes(fastify: FastifyInstance) {
         .executeTakeFirst();
 
       if (!user) {
-        return reply.code(404);
+        return reply.status(404).send();
       }
 
-      return reply.send(user);
+      return reply.status(200).send(user);
     } catch (error) {
       request.log.error(error);
-      return reply.code(500);
+      return reply.status(500).send();
     }
   });
 
@@ -136,11 +136,11 @@ export async function userRoutes(fastify: FastifyInstance) {
         .executeTakeFirst();
 
       if (existingUser && existingUser.firebase_id !== firebaseUid) {
-        return reply.code(409);
+        return reply.status(409).send();
       }
 
       // Upsert user
-      const result = await db
+      await db
         .insertInto('users')
         .values({
           firebase_id: firebaseUid,
@@ -150,11 +150,10 @@ export async function userRoutes(fastify: FastifyInstance) {
           .column('firebase_id')
           .doUpdateSet({ username })
         )
-        .returning(['username', 'id'])
-        .executeTakeFirst();
+        .execute();
     } catch (error) {
       request.log.error(error);
-      return reply.code(500);
+      return reply.status(500).send();
     }
   });
 
@@ -167,6 +166,150 @@ export async function userRoutes(fastify: FastifyInstance) {
       .orderBy('created_at', 'desc')
       .execute();
 
-    return reply.send(videos);
+    return reply.status(200).send(videos);
+  });
+
+  fastify.register(async function (fastify) {
+    fastify.addHook('preHandler', authenticateRequest);
+
+    // Follow a user
+    fastify.post<{
+      Params: { userId: string };
+    }>('/user/:userId/follows', async (request, reply) => {
+      try {
+        // Get the current user's ID
+        const follower = await db
+          .selectFrom('users')
+          .where('firebase_id', '=', request.uid!)
+          .select(['id'])
+          .executeTakeFirst();
+
+        if (!follower) {
+          return reply.status(401).send();
+        }
+
+        // Check if the user to follow exists
+        const followed = await db
+          .selectFrom('users')
+          .where('id', '=', request.params.userId)
+          .select(['id'])
+          .executeTakeFirst();
+
+        if (!followed) {
+          return reply.status(404).send();
+        }
+
+        // Prevent self-following
+        if (follower.id === followed.id) {
+          return reply.status(400).send();
+        }
+
+        // Create the follow relationship
+        await db
+          .insertInto('follows')
+          .values({
+            follower_id: follower.id,
+            followed_id: followed.id
+          })
+          .execute();
+
+        return reply.status(201).send();
+      } catch (error: any) {
+        request.log.error(error);
+
+        // Handle unique constraint violation
+        if (error.code === '23505') {
+          return reply.status(400).send();
+        }
+        
+        return reply.status(500).send();
+      }
+    });
+
+    // Unfollow a user
+    fastify.delete<{
+      Params: { userId: string };
+    }>('/user/:userId/follows', async (request, reply) => {
+      try {
+        // Get the current user's ID
+        const follower = await db
+          .selectFrom('users')
+          .where('firebase_id', '=', request.uid!)
+          .select(['id'])
+          .executeTakeFirst();
+
+        if (!follower) {
+          return reply.status(401).send();
+        }
+
+        // Delete the follow relationship
+        const result = await db
+          .deleteFrom('follows')
+          .where('follower_id', '=', follower.id)
+          .where('followed_id', '=', request.params.userId)
+          .execute();
+
+        if (result.length === 0) {
+          return reply.status(404).send();
+        }
+
+        return reply.status(200).send();
+      } catch (error) {
+        request.log.error(error);
+        return reply.status(500).send();
+      }
+    });
+
+    // Get follow counts for a user
+    fastify.get<{
+      Params: { userId: string };
+    }>('/user/:userId/follows', async (request, reply) => {
+      try {
+        // Get the current user's ID
+        const currentUser = await db
+          .selectFrom('users')
+          .where('firebase_id', '=', request.uid!)
+          .select(['id'])
+          .executeTakeFirst();
+
+        if (!currentUser) {
+          return reply.status(401).send();
+        }
+
+        const [followers, following, isFollowing] = await Promise.all([
+          // Count followers
+          db.selectFrom('follows')
+            .where('followed_id', '=', request.params.userId)
+            .select(({ fn }) => [
+              fn.countAll().as('count')
+            ])
+            .executeTakeFirst(),
+          
+          // Count following
+          db.selectFrom('follows')
+            .where('follower_id', '=', request.params.userId)
+            .select(({ fn }) => [
+              fn.countAll().as('count')
+            ])
+            .executeTakeFirst(),
+
+          // Check if current user is following the requested user
+          db.selectFrom('follows')
+            .where('follower_id', '=', currentUser.id)
+            .where('followed_id', '=', request.params.userId)
+            .selectAll()
+            .executeTakeFirst()
+        ]);
+
+        return reply.status(200).send({
+          followers: Number(followers?.count || 0),
+          following: Number(following?.count || 0),
+          isFollowing: !!isFollowing
+        });
+      } catch (error) {
+        request.log.error(error);
+        return reply.status(500).send({ error: 'Internal server error' });
+      }
+    });
   });
 }

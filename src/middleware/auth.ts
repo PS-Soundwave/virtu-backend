@@ -11,7 +11,7 @@ export async function authenticateRequest(request: FastifyRequest, reply: Fastif
   const authHeader = request.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return reply.code(401);
+    return reply.status(401).send();
   }
 
   const idToken = authHeader.substring(7); // Remove 'Bearer ' prefix
@@ -21,6 +21,6 @@ export async function authenticateRequest(request: FastifyRequest, reply: Fastif
     request.uid = decodedToken.uid;
   } catch (error) {
     request.log.error('Firebase auth error:', error);
-    return reply.code(401);
+    return reply.status(401).send();
   }
 }
