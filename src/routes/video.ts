@@ -358,4 +358,31 @@ export type Video = {
 
 export function registerVideoRoutes(fastify: FastifyInstance) {
   processVideoUpload(fastify);
+
+  fastify.get('/video/:videoId/subtitles', async (request, reply) => {
+    const { videoId } = request.params as { videoId: string };
+    
+    // Check if video exists
+    const video = await db.selectFrom('videos')
+      .where('id', '=', videoId)
+      .selectAll()
+      .executeTakeFirst();
+  
+    if (!video) {
+      return reply.status(404).send({ error: 'Video not found' });
+    }
+  
+    // Get subtitles
+    const subtitles = await db.selectFrom('subtitles')
+      .where('video_id', '=', videoId)
+      .select(['start_time', 'end_time', 'text'])
+      .orderBy('start_time')
+      .execute();
+  
+    if (!subtitles) {
+      return reply.status(404).send({ error: 'Subtitles not found for this video' });
+    }
+  
+    return reply.send({ subtitles });
+  });
 }
