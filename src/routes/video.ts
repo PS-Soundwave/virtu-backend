@@ -10,6 +10,7 @@ import { db } from '../db/index.js';
 import { authenticateRequest } from '../middleware/auth.js';
 import { gzip } from 'zlib';
 import { promisify } from 'util';
+import OpenAI from 'openai';
 
 const s3Client = new S3Client({ 
   region: env.AWS_REGION,
@@ -17,6 +18,10 @@ const s3Client = new S3Client({
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY
   }
+});
+
+const openai = new OpenAI({
+  apiKey: env.OPENAI_API_KEY
 });
 
 async function processVideoAsync(
@@ -274,6 +279,225 @@ async function processVideoAsync(
   }
 }
 
+interface ClipSuggestion {
+  startTime: number;
+  endTime: number;
+  confidence: number;
+  reason: string;
+}
+
+interface SubtitleSegment {
+  start_time: number;
+  end_time: number;
+  text: string;
+}
+
+interface AnalysisWindow {
+  subtitles: SubtitleSegment[];
+  startIndex: number;
+  endIndex: number;
+}
+
+async function analyzeContent(
+  subtitles: SubtitleSegment[],
+  prompt: string,
+  logger: FastifyBaseLogger
+): Promise<ClipSuggestion[]> {
+  // Create overlapping windows with 30-second stride
+  const windowSize = 120; // 2 minutes
+  const stride = 90; // 30 seconds overlap
+  const contextWindows: AnalysisWindow[] = [];
+  
+  // Create windows based on time ranges rather than indices
+  let currentStartTime = 0;
+  const lastStartTime = subtitles[subtitles.length - 1].start_time;
+
+  while (currentStartTime <= lastStartTime) {
+    const windowEnd = currentStartTime + windowSize;
+    const windowSubtitles = subtitles.filter(
+      s => s.start_time >= currentStartTime && s.start_time <= windowEnd
+    );
+
+    if (windowSubtitles.length > 0) {
+      const startIndex = subtitles.findIndex(s => s === windowSubtitles[0]);
+      const endIndex = subtitles.findIndex(s => s === windowSubtitles[windowSubtitles.length - 1]);
+      
+      if (startIndex !== -1 && endIndex !== -1) {
+        contextWindows.push({
+          subtitles: windowSubtitles,
+          startIndex,
+          endIndex
+        });
+      }
+    }
+
+    currentStartTime += stride;
+  }
+
+  logger.info({ 
+    windowCount: contextWindows.length,
+    firstWindow: contextWindows[0],
+    lastWindow: contextWindows[contextWindows.length - 1],
+    totalSubtitles: subtitles.length
+  }, 'Created context windows');
+
+  // Analyze each window
+  const rawSuggestions: Array<{
+    startIndex: number;
+    endIndex: number;
+    confidence: number;
+    reason: string;
+  }> = [];
+
+  for (const [windowIndex, window] of contextWindows.entries()) {
+    const text = window.subtitles.map(s => 
+      `[${s.start_time}s - ${s.end_time}s] ${s.text}`
+    ).join('\n');
+    
+    try {
+      logger.info({ windowIndex, textLength: text.length }, 'Analyzing window');
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [{
+          role: "system",
+          content: `You are analyzing a transcript segment to find ${prompt}. 
+          Each line of the transcript has a timestamp range in milliseconds.
+          Return JSON with segments that match the prompt:
+          {
+            "segments": [
+              {
+                "startTime": number, // timestamp in milliseconds
+                "endTime": number,   // timestamp in milliseconds
+                "confidence": number,
+                "reason": string
+              }
+            ]
+          }`
+        }, {
+          role: "user",
+          content: text
+        }],
+        temperature: 0.2,
+        max_tokens: 500
+      }, {
+        timeout: 10000
+      });
+
+      const responseContent = response.choices[0].message?.content;
+      if (!responseContent) {
+        logger.warn({ windowIndex }, 'Empty response from OpenAI');
+        continue;
+      }
+
+      logger.info({ windowIndex, responseContent }, 'Got response from OpenAI');
+
+      try {
+        const result = JSON.parse(responseContent);
+        if (result.segments && Array.isArray(result.segments)) {
+          for (const segment of result.segments) {
+            if (segment.confidence > 0.6) {
+              // Find the closest subtitles to the suggested timestamps
+              const startSubtitle = subtitles.reduce((prev, curr) => {
+                const prevDiff = Math.abs(prev.start_time - segment.startTime);
+                const currDiff = Math.abs(curr.start_time - segment.startTime);
+                return currDiff < prevDiff ? curr : prev;
+              });
+
+              const endSubtitle = subtitles.reduce((prev, curr) => {
+                const prevDiff = Math.abs(prev.end_time - segment.endTime);
+                const currDiff = Math.abs(curr.end_time - segment.endTime);
+                return currDiff < prevDiff ? curr : prev;
+              });
+
+              const startIndex = subtitles.findIndex(s => s === startSubtitle);
+              const endIndex = subtitles.findIndex(s => s === endSubtitle);
+
+              if (startIndex !== -1 && endIndex !== -1) {
+                rawSuggestions.push({
+                  startIndex,
+                  endIndex,
+                  confidence: segment.confidence,
+                  reason: segment.reason
+                });
+              }
+            }
+          }
+        }
+      } catch (parseError) {
+        logger.error({ windowIndex, responseContent, error: parseError }, 'Failed to parse OpenAI response');
+        continue;
+      }
+    } catch (error: any) {
+      logger.error({ 
+        error: error.message, 
+        windowIndex,
+        status: error.status,
+        code: error.code 
+      }, 'Error analyzing content window');
+      continue;
+    }
+  }
+
+  logger.info({ 
+    rawSuggestionsCount: rawSuggestions.length,
+    rawSuggestions 
+  }, 'Generated raw suggestions');
+
+  if (rawSuggestions.length === 0) {
+    return [];
+  }
+
+  // Merge overlapping or nearby segments
+  const mergedSuggestions: ClipSuggestion[] = [];
+  const sortedSuggestions = rawSuggestions.sort((a, b) => a.startIndex - b.startIndex);
+  
+  let currentSegment = sortedSuggestions[0];
+  
+  for (let i = 1; i < sortedSuggestions.length; i++) {
+    const nextSegment = sortedSuggestions[i];
+    
+    // If segments overlap or are within 3 subtitles of each other, merge them
+    if (nextSegment.startIndex <= currentSegment.endIndex + 3) {
+      currentSegment = {
+        startIndex: currentSegment.startIndex,
+        endIndex: Math.max(currentSegment.endIndex, nextSegment.endIndex),
+        confidence: Math.max(currentSegment.confidence, nextSegment.confidence),
+        reason: `${currentSegment.reason}; ${nextSegment.reason}`
+      };
+    } else {
+      // Add current segment to final results
+      mergedSuggestions.push({
+        startTime: subtitles[currentSegment.startIndex].start_time,
+        endTime: subtitles[currentSegment.endIndex].end_time,
+        confidence: currentSegment.confidence,
+        reason: currentSegment.reason
+      });
+      currentSegment = nextSegment;
+    }
+  }
+  
+  // Add the last segment
+  if (currentSegment && sortedSuggestions.length > 0) {
+    mergedSuggestions.push({
+      startTime: subtitles[currentSegment.startIndex].start_time,
+      endTime: subtitles[currentSegment.endIndex].end_time,
+      confidence: currentSegment.confidence,
+      reason: currentSegment.reason
+    });
+  }
+
+  logger.info({ 
+    mergedSuggestionsCount: mergedSuggestions.length,
+    mergedSuggestions 
+  }, 'Generated merged suggestions');
+
+  // Sort by confidence and return top results
+  return mergedSuggestions
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 5);
+}
+
 export async function processVideoUpload(fastify: FastifyInstance) {
   fastify.post('/video', {
     preHandler: authenticateRequest
@@ -378,11 +602,57 @@ export function registerVideoRoutes(fastify: FastifyInstance) {
       .select(['start_time', 'end_time', 'text'])
       .orderBy('start_time')
       .execute();
-  
-    if (!subtitles) {
-      return reply.status(404).send({ error: 'Subtitles not found for this video' });
+
+    if (!subtitles || subtitles.length === 0) {
+      return reply.status(404).send({ error: 'No subtitles found for this video' });
     }
-  
+
     return reply.send({ subtitles });
+  });
+
+  fastify.get('/video/:videoId/suggest-clips', async (request, reply) => {
+    const { videoId } = request.params as { videoId: string };
+    const { prompt } = request.query as { prompt?: string };
+
+    if (!prompt) {
+      return reply.status(400).send({ error: 'Missing prompt parameter' });
+    }
+
+    // Check if video exists
+    const video = await db.selectFrom('videos')
+      .where('id', '=', videoId)
+      .selectAll()
+      .executeTakeFirst();
+
+    if (!video) {
+      return reply.status(404).send({ error: 'Video not found' });
+    }
+
+    // Get subtitles
+    const subtitles = await db.selectFrom('subtitles')
+      .where('video_id', '=', videoId)
+      .select(['start_time', 'end_time', 'text'])
+      .orderBy('start_time')
+      .execute();
+
+    if (!subtitles || subtitles.length === 0) {
+      return reply.status(404).send({ error: 'No subtitles found for this video' });
+    }
+
+    request.log.info({ 
+      videoId, 
+      subtitlesCount: subtitles.length,
+      firstSubtitle: subtitles[0],
+      lastSubtitle: subtitles[subtitles.length - 1]
+    }, 'Processing clip suggestions request');
+
+    try {
+      const suggestions = await analyzeContent(subtitles, prompt, request.log);
+      request.log.info({ suggestionsCount: suggestions.length }, 'Generated clip suggestions');
+      return reply.send(suggestions);
+    } catch (error) {
+      request.log.error({ error }, 'Error generating clip suggestions');
+      return reply.status(500).send({ error: 'Error generating clip suggestions' });
+    }
   });
 }
