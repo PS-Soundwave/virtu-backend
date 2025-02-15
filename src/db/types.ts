@@ -13,6 +13,7 @@ export interface VideoTable {
     created_at: Generated<Date>;
     uploader: string;
     thumbnail_key: string;
+    visibility: Generated<'public' | 'private'>;
 }
 
 export interface UserTable {

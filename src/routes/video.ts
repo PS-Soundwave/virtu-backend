@@ -165,12 +165,13 @@ async function processVideoAsync(
       await s3Client.send(new PutObjectCommand(uploadParams));
     }));
 
-    const video = await db.insertInto('videos')
-        .values({
-          key: `${key}/master.m3u8`,  // Store the directory path,
-          thumbnail_key: `${key}/thumbnail.webp`,
-          uploader: user
-        })
+    const video = await db
+      .insertInto('videos')
+      .values({
+        key: `${key}/master.m3u8`,
+        thumbnail_key: `${key}/thumbnail.webp`,
+        uploader: user
+      })
         .returning(['id'])
         .executeTakeFirst();
 
@@ -380,8 +381,6 @@ async function analyzeContent(
         }],
         temperature: 0.2,
         max_tokens: 500
-      }, {
-        timeout: 10000
       });
 
       const responseContent = response.choices[0].message?.content;
@@ -562,7 +561,8 @@ export async function processVideoUpload(fastify: FastifyInstance) {
     try {
       const videos = await db
         .selectFrom('videos')
-        .select(['id', 'key', 'thumbnail_key'])
+        .select(['id', 'key', 'thumbnail_key', 'visibility'])
+        .where('visibility', '=', 'public')
         .orderBy('created_at', 'desc')
         .execute();
 
@@ -577,7 +577,8 @@ export async function processVideoUpload(fastify: FastifyInstance) {
 export type Video = {
   id: string,
   key: string,
-  thumbnail_key: string
+  thumbnail_key: string,
+  visibility: 'public' | 'private'
 }
 
 export function registerVideoRoutes(fastify: FastifyInstance) {
@@ -654,5 +655,63 @@ export function registerVideoRoutes(fastify: FastifyInstance) {
       request.log.error({ error }, 'Error generating clip suggestions');
       return reply.status(500).send({ error: 'Error generating clip suggestions' });
     }
+  });
+
+  fastify.patch('/video/:id/visibility', {
+    preHandler: authenticateRequest,
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' }
+        },
+        required: ['id']
+      },
+      body: {
+        type: 'object',
+        properties: {
+          visibility: { type: 'string', enum: ['public', 'private'] }
+        },
+        required: ['visibility']
+      }
+    }
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { visibility } = request.body as { visibility: 'public' | 'private' };
+    
+    const user = await db.selectFrom('users')
+        .select(['id'])
+        .where('firebase_id', '=', request.uid!)
+        .executeTakeFirst();
+
+    if (!user) {
+      reply.status(401).send();
+      return;
+    }
+
+    // Check if the video exists and belongs to the user
+    const video = await db
+      .selectFrom('videos')
+      .select(['uploader'])
+      .where('id', '=', id)
+      .executeTakeFirst();
+
+    if (!video) {
+      reply.status(404).send({ error: 'Video not found' });
+      return;
+    }
+
+    if (video.uploader !== user.id) {
+      reply.status(403).send({ error: 'You can only update visibility of your own videos' });
+      return;
+    }
+
+    await db
+      .updateTable('videos')
+      .set({ visibility })
+      .where('id', '=', id)
+      .execute();
+
+    reply.status(200).send();
   });
 }

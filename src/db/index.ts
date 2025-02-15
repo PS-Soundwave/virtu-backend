@@ -5,6 +5,7 @@ import type { Database } from "./types.js";
 import { promises } from "fs";
 import path from "path";
 import { FileMigrationProvider } from "kysely";
+import { WithSchemableTypesPlugin } from "./extensions/with_schemable_types.js";
 
 const dialect = new PostgresDialect({
     pool: new pg.Pool({
@@ -14,7 +15,7 @@ const dialect = new PostgresDialect({
 
 export const db = new Kysely<Database>({
     dialect
-}).withSchema('virtu')
+}).withPlugin(new WithSchemableTypesPlugin('virtu')).withSchema('virtu')
 
 export const migrator = new Migrator({
     db,

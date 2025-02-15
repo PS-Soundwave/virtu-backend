@@ -157,12 +157,37 @@ export async function userRoutes(fastify: FastifyInstance) {
     }
   });
 
-   // Get videos uploaded by a specific user
-   fastify.get<{Params: { userId: string }, Reply: Video[]}>('/user/:userId/video', async (request, reply) => {
+  // Get videos uploaded by a specific user
+  fastify.get<{Params: { userId: string }, Reply: Video[]}>('/user/:userId/video', async (request, reply) => {
     const videos = await db
       .selectFrom('videos')
       .where('uploader', '=', request.params.userId)
-      .select(['id', 'key', 'thumbnail_key'])
+      .where('visibility', '=', 'public')
+      .select(['id', 'key', 'thumbnail_key', 'visibility'])
+      .orderBy('created_at', 'desc')
+      .execute();
+
+    return reply.status(200).send(videos);
+  });
+
+  // Get all videos (public and private) for the authenticated user
+  fastify.get<{Reply: Video[]}>('/user/me/video', {
+    preHandler: authenticateRequest
+  }, async (request, reply) => {
+    const user = await db.selectFrom('users')
+      .select(['id'])
+      .where('firebase_id', '=', request.uid!)
+      .executeTakeFirst();
+
+    if (!user) {
+      reply.status(401).send();
+      return;
+    }
+
+    const videos = await db
+      .selectFrom('videos')
+      .where('uploader', '=', user.id)
+      .select(['id', 'key', 'thumbnail_key', 'visibility'])
       .orderBy('created_at', 'desc')
       .execute();
 
